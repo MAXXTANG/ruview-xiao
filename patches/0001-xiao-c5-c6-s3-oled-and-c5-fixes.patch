@@ -36,7 +36,7 @@ index a92d040..de6e4ae 100644
      return ESP_OK;
  }
 diff --git a/firmware/esp32-csi-node/main/main.c b/firmware/esp32-csi-node/main/main.c
-index 67973ce..325c835 100644
+index 67973ce..7a87b00 100644
 --- a/firmware/esp32-csi-node/main/main.c
 +++ b/firmware/esp32-csi-node/main/main.c
 @@ -29,6 +29,7 @@
@@ -47,11 +47,12 @@ index 67973ce..325c835 100644
  #include "mmwave_sensor.h"
  #include "swarm_bridge.h"
  #include "rv_radio_ops.h"          /* ADR-081 Layer 1 — Radio Abstraction Layer. */
-@@ -405,8 +406,18 @@ void app_main(void)
+@@ -405,8 +406,27 @@ void app_main(void)
          }
      }
  
 -    /* ADR-063: Initialize mmWave sensor (auto-detect on UART). */
+-    esp_err_t mmwave_ret = mmwave_sensor_init(-1, -1);  /* -1 = use default GPIO pins */
 +    /* ADR-063: Initialize mmWave sensor (auto-detect on UART).
 +     * NOTE: the default mmWave UART pins are TX=17/RX=18. On ESP32-C5 those are
 +     * the SPI flash pins (MSPI MISO=17, WP=18) — probing them reconfigures the
@@ -61,13 +62,22 @@ index 67973ce..325c835 100644
 +#if defined(CONFIG_IDF_TARGET_ESP32C5)
 +    esp_err_t mmwave_ret = ESP_ERR_NOT_SUPPORTED;
 +    ESP_LOGI(TAG, "mmWave probe skipped on C5 (default pins 17/18 are flash pins)");
++#elif defined(CONFIG_IDF_TARGET_ESP32S3)
++    /* Seeed "24GHz mmWave for XIAO" = HLK-LD2410, wired on the XIAO S3 header
++     * D2/D3 = GPIO3/GPIO4. init(uart_tx_pin, uart_rx_pin); orientation verified
++     * empirically as MCU TX=GPIO4, RX=GPIO3 ((3,4) did NOT detect). A node with
++     * no radar wired probes and falls back to CSI-only gracefully. */
++    esp_err_t mmwave_ret = mmwave_sensor_init(4, 3);
 +#else
-     esp_err_t mmwave_ret = mmwave_sensor_init(-1, -1);  /* -1 = use default GPIO pins */
++    /* Other targets (e.g. C6): default pins. No mmWave is wired in this setup;
++     * GPIO3/4 are not the C6 D2/D3, so use the generic default and let the probe
++     * fall back to CSI-only. */
++    esp_err_t mmwave_ret = mmwave_sensor_init(-1, -1);
 +#endif
      if (mmwave_ret == ESP_OK) {
          mmwave_state_t mw;
          if (mmwave_sensor_get_state(&mw)) {
-@@ -476,6 +487,10 @@ void app_main(void)
+@@ -476,6 +496,10 @@ void app_main(void)
      }
  #endif
  
