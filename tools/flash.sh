@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # Flash prebuilt RuView-XIAO firmware. Usage: ./tools/flash.sh <s3|c6|c5> <port>
 set -euo pipefail
-BOARD="${1:?usage: flash.sh <s3|c6|c5> <port>}"
-PORT="${2:?usage: flash.sh <s3|c6|c5> <port>}"
-DIR="$(cd "$(dirname "$0")/.." && pwd)/prebuilt/$BOARD"
-[ -d "$DIR" ] || { echo "no prebuilt dir for '$BOARD'"; exit 1; }
+# Usage: flash.sh <s3|c6|c5> <port> [bin-dir]
+# bin-dir defaults to ./prebuilt/<board> or ./<board> (e.g. an extracted release zip).
+BOARD="${1:?usage: flash.sh <s3|c6|c5> <port> [bin-dir]}"
+PORT="${2:?usage: flash.sh <s3|c6|c5> <port> [bin-dir]}"
+DIR="${3:-}"
+if [ -z "$DIR" ]; then
+  for cand in "./prebuilt/$BOARD" "./$BOARD" "$(cd "$(dirname "$0")/.." && pwd)/prebuilt/$BOARD"; do
+    [ -f "$cand/esp32-csi-node.bin" ] && { DIR="$cand"; break; }
+  done
+fi
+[ -n "$DIR" ] && [ -f "$DIR/esp32-csi-node.bin" ] || {
+  echo "no binaries for '$BOARD'. Download a release zip, extract it, and pass its dir:"
+  echo "  ./tools/flash.sh $BOARD $PORT path/to/$BOARD"; exit 1; }
 
 case "$BOARD" in
   s3) CHIP=esp32s3; BOOT=0x0;    MODE="--flash_mode dio  --flash_freq 80m --flash_size 8MB" ;;

@@ -1,0 +1,69 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: esp32s3, board: s3 }
+          - { target: esp32c6, board: c6 }
+          - { target: esp32c5, board: c5 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble upstream RuView + our changes
+        shell: bash
+        run: |
+          set -e
+          git config --global --add safe.directory '*'
+          # Clone upstream at the exact tag the patch was made against (no submodules needed)
+          git clone --depth 1 --branch v0.8.2-esp32 https://github.com/ruvnet/RuView.git upstream
+          DST=upstream/firmware/esp32-csi-node
+          cp firmware/main/oled_ssd1306.c firmware/main/oled_ssd1306.h firmware/main/cjk_font.h "$DST/main/"
+          cp firmware/sdkconfig.defaults.esp32c5 "$DST/"
+          git -C upstream apply "$GITHUB_WORKSPACE/patches/0001-xiao-c5-c6-s3-oled-and-c5-fixes.patch"
+
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -e
+          . "$IDF_PATH/export.sh"
+          cd upstream/firmware/esp32-csi-node
+          idf.py set-target ${{ matrix.target }}
+          idf.py build
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          set -e
+          B=upstream/firmware/esp32-csi-node/build
+          mkdir -p "out/${{ matrix.board }}"
+          cp "$B/bootloader/bootloader.bin" \
+             "$B/partition_table/partition-table.bin" \
+             "$B/ota_data_initial.bin" \
+             "$B/esp32-csi-node.bin" "out/${{ matrix.board }}/"
+          ( cd out && zip -r "ruview-xiao-${{ matrix.board }}.zip" "${{ matrix.board }}" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ruview-xiao-${{ matrix.board }}
+          path: out/ruview-xiao-${{ matrix.board }}.zip
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/ruview-xiao-${{ matrix.board }}.zip

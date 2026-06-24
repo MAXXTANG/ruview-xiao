@@ -21,15 +21,25 @@ firmware goes to upstream; see [LICENSE](LICENSE) (MIT, © rUv).
 
 All three build from the **same source tree** via `idf.py set-target`.
 
+## Wiring & data flow
+
+![wiring](docs/wiring.svg)
+
 ## Quick flash (no build needed)
 
-Prebuilt binaries are in [`prebuilt/`](prebuilt/). Install `esptool` (`pip install esptool`), then:
+Grab the binaries for your board from the
+[**Releases**](../../releases/latest) page (`ruview-xiao-{s3,c6,c5}.zip`,
+built by CI). Install `esptool` (`pip install esptool`), unzip, then:
 
 ```bash
-# pick your board dir: prebuilt/s3 | prebuilt/c6 | prebuilt/c5
-./tools/flash.sh s3 /dev/cu.usbmodemXXXX        # S3 / C6
-./tools/flash.sh c5 /dev/cu.usbmodemXXXX        # C5 (uses DOUT@40MHz — see notes)
+unzip ruview-xiao-c5.zip                          # extracts a c5/ folder
+./tools/flash.sh c5 /dev/cu.usbmodemXXXX c5       # board, port, bin-dir
+# S3 / C6 the same: ./tools/flash.sh s3 <port> s3
 ```
+
+> The C5 helper uses **DOUT @ 40 MHz** (its Puya flash won't ROM-boot at the
+> 80 MHz default). If a C5 is stuck crash-looping, retry the flash a few times
+> (USB-JTAG reset) or unplug → hold **BOOT** → replug → release.
 
 Then provision WiFi + the aggregator target (uses upstream `provision.py`):
 
@@ -58,8 +68,13 @@ patches/0001-*.patch               # our changes to 4 upstream files (main.c, ed
 tools/udp_receiver.py              # host-side vitals decoder
 tools/gen_cjk_font.py              # regenerate cjk_font.h from a system CJK font
 tools/flash.sh                     # esptool wrapper per target
-prebuilt/{s3,c6,c5}/               # bootloader + partition-table + ota_data + app
+docs/wiring.svg                    # wiring + data-flow diagram
+.github/workflows/build.yml        # CI: builds all 3 targets, attaches zips to Releases
 ```
+
+Binaries are produced by CI (`.github/workflows/build.yml`) for **esp32s3 /
+esp32c6 / esp32c5** on every push (downloadable as build artifacts) and are
+attached to **[Releases](../../releases)** on tag pushes (`v*`).
 
 ## Build from source
 
