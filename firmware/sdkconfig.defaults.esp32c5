@@ -1,0 +1,57 @@
+# ESP32-C5 CSI Node — Target overlay (Seeed XIAO ESP32-C5)
+#
+# Auto-applied by ESP-IDF when CONFIG_IDF_TARGET=esp32c5.
+# Layered on top of sdkconfig.defaults — only the differences live here.
+#
+# Build:  idf.py set-target esp32c5 && idf.py build
+#
+# Hardware: Seeed XIAO ESP32-C5 (RISC-V single core, dual-band Wi-Fi 6, BLE 5,
+# 8 MB Puya flash, USB-Serial/JTAG). C5 has NO IEEE 802.15.4 radio (unlike C6).
+#
+# Two C5-specific fixes were required to get a stable node (see git history):
+#   1. Flash: this Puya part fails ROM boot at the IDF default 80 MHz — use
+#      DOUT mode @ 40 MHz (set below; baked into the bootloader image header).
+#   2. mmWave: the default mmWave UART pins (TX=17/RX=18) are the C5 MSPI flash
+#      pins → reconfiguring them corrupts code-fetch ("Illegal instruction").
+#      main.c now skips the mmWave probe on C5.
+
+# ── Target ──
+CONFIG_IDF_TARGET="esp32c5"
+
+# ── Flash: DOUT @ 40 MHz (Puya part won't ROM-boot at the 80 MHz default) ──
+CONFIG_ESPTOOLPY_FLASHMODE_DOUT=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# ── CSI (required) ──
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+
+# ── Wi-Fi 6 / WPA3 (C5 has HE support; SAE opt-in) ──
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
+
+# ── No 802.15.4 on C5 (radio absent) ──
+CONFIG_IEEE802154_ENABLED=n
+CONFIG_OPENTHREAD_ENABLED=n
+
+# ── No display / WASM / mmWave on the C5 node ──
+# CONFIG_DISPLAY_ENABLE is not set
+# CONFIG_WASM_ENABLE is not set
+
+# ── Compiler ──
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# ── Logging ──
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ── lwIP / FreeRTOS — same as S3/C6 path ──
+CONFIG_LWIP_SO_RCVBUF=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=8192
+
+# ── Power: 160 MHz (proven stable; C5 can do 240 but 160 matches C6) ──
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160

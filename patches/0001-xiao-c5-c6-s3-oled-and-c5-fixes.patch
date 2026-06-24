@@ -1,0 +1,91 @@
+diff --git a/firmware/esp32-csi-node/main/CMakeLists.txt b/firmware/esp32-csi-node/main/CMakeLists.txt
+index 0cabf5d..df141cc 100644
+--- a/firmware/esp32-csi-node/main/CMakeLists.txt
++++ b/firmware/esp32-csi-node/main/CMakeLists.txt
+@@ -17,6 +17,8 @@ set(SRCS
+     "c6_sync_espnow.c"
+     # ADR-110 B1/B2 unblock — soft-AP HE/TWT (C6-only when enabled)
+     "c6_softap_he.c"
++    # SSD1306 I2C OLED for Seeed XIAO Expansion Board (standalone, always built)
++    "oled_ssd1306.c"
+ )
+ 
+ # ESP-IDF v6+: headers must resolve via explicit REQUIRES (no implicit deps).
+diff --git a/firmware/esp32-csi-node/main/edge_processing.c b/firmware/esp32-csi-node/main/edge_processing.c
+index a92d040..de6e4ae 100644
+--- a/firmware/esp32-csi-node/main/edge_processing.c
++++ b/firmware/esp32-csi-node/main/edge_processing.c
+@@ -1420,7 +1420,9 @@ esp_err_t edge_processing_init(const edge_config_t *cfg)
+     BaseType_t ret = xTaskCreatePinnedToCore(
+         edge_task,
+         "edge_dsp",
+-        8192,       /* 8 KB stack — sufficient for DSP pipeline. */
++        16384,      /* 16 KB stack — pipeline uses ~6.5-7.5 KB and the compressed-
++                     * frame path adds two 1 KB buffers; 8 KB overflowed → CPU_LOCKUP
++                     * double-fault on ESP32-C5. Doubled for headroom (all targets). */
+         NULL,
+         5,          /* Priority 5 — above idle, below WiFi. */
+         NULL,
+@@ -1431,7 +1433,7 @@ esp_err_t edge_processing_init(const edge_config_t *cfg)
+         return ESP_ERR_NO_MEM;
+     }
+ 
+-    ESP_LOGI(TAG, "Edge DSP task created on core %d (stack=8192, priority=5)",
++    ESP_LOGI(TAG, "Edge DSP task created on core %d (stack=16384, priority=5)",
+              (int)dsp_core);
+     return ESP_OK;
+ }
+diff --git a/firmware/esp32-csi-node/main/main.c b/firmware/esp32-csi-node/main/main.c
+index 67973ce..325c835 100644
+--- a/firmware/esp32-csi-node/main/main.c
++++ b/firmware/esp32-csi-node/main/main.c
+@@ -29,6 +29,7 @@
+ #include "wasm_runtime.h"
+ #include "wasm_upload.h"
+ #include "display_task.h"
++#include "oled_ssd1306.h"
+ #include "mmwave_sensor.h"
+ #include "swarm_bridge.h"
+ #include "rv_radio_ops.h"          /* ADR-081 Layer 1 — Radio Abstraction Layer. */
+@@ -405,8 +406,18 @@ void app_main(void)
+         }
+     }
+ 
+-    /* ADR-063: Initialize mmWave sensor (auto-detect on UART). */
++    /* ADR-063: Initialize mmWave sensor (auto-detect on UART).
++     * NOTE: the default mmWave UART pins are TX=17/RX=18. On ESP32-C5 those are
++     * the SPI flash pins (MSPI MISO=17, WP=18) — probing them reconfigures the
++     * flash data lines and corrupts code-fetch → "Illegal instruction" crash.
++     * C5 has no validated free default pins here and no mmWave sensor is wired,
++     * so skip the probe on C5. (S3/C6: 17/18 are ordinary GPIO, safe.) */
++#if defined(CONFIG_IDF_TARGET_ESP32C5)
++    esp_err_t mmwave_ret = ESP_ERR_NOT_SUPPORTED;
++    ESP_LOGI(TAG, "mmWave probe skipped on C5 (default pins 17/18 are flash pins)");
++#else
+     esp_err_t mmwave_ret = mmwave_sensor_init(-1, -1);  /* -1 = use default GPIO pins */
++#endif
+     if (mmwave_ret == ESP_OK) {
+         mmwave_state_t mw;
+         if (mmwave_sensor_get_state(&mw)) {
+@@ -476,6 +487,10 @@ void app_main(void)
+     }
+ #endif
+ 
++    /* Seeed XIAO Expansion Board SSD1306 OLED (I2C, standalone). Probes 0x3C
++     * and no-ops if absent, so it is always safe to start. */
++    oled_task_start();
++
+     /* RuView#893/#521: the MGMT-only promiscuous filter (set in
+      * csi_collector_init as the #396 display-crash workaround) starves the CSI
+      * callback on display-less boards — yield collapses to 0 pps and the node
+diff --git a/firmware/esp32-csi-node/sdkconfig.defaults b/firmware/esp32-csi-node/sdkconfig.defaults
+index 94ec092..5203597 100644
+--- a/firmware/esp32-csi-node/sdkconfig.defaults
++++ b/firmware/esp32-csi-node/sdkconfig.defaults
+@@ -66,3 +66,6 @@ CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
+ # Was present in sdkconfig.defaults.template but missing here — fixed
+ # in the v0.6.5-esp32 release.
+ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=8192
++
++# Disable RM67162 AMOLED/LVGL (not present) so SSD1306 OLED can own I2C_NUM_0 via the new driver
++CONFIG_DISPLAY_ENABLE=n
