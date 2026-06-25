@@ -36,10 +36,18 @@ index a92d040..de6e4ae 100644
      return ESP_OK;
  }
 diff --git a/firmware/esp32-csi-node/main/main.c b/firmware/esp32-csi-node/main/main.c
-index 67973ce..7a87b00 100644
+index 67973ce..7875866 100644
 --- a/firmware/esp32-csi-node/main/main.c
 +++ b/firmware/esp32-csi-node/main/main.c
-@@ -29,6 +29,7 @@
+@@ -19,6 +19,7 @@
+ #include "esp_app_desc.h"
+ #include "sdkconfig.h"
+ #include "led_strip.h"
++#include "driver/gpio.h"           /* XIAO C6 external-antenna RF switch */
+ 
+ #include "csi_collector.h"
+ #include "stream_sender.h"
+@@ -29,6 +30,7 @@
  #include "wasm_runtime.h"
  #include "wasm_upload.h"
  #include "display_task.h"
@@ -47,7 +55,64 @@ index 67973ce..7a87b00 100644
  #include "mmwave_sensor.h"
  #include "swarm_bridge.h"
  #include "rv_radio_ops.h"          /* ADR-081 Layer 1 — Radio Abstraction Layer. */
-@@ -405,8 +406,27 @@ void app_main(void)
+@@ -59,6 +61,7 @@ nvs_config_t g_nvs_config;
+ 
+ static EventGroupHandle_t s_wifi_event_group;
+ static int s_retry_num = 0;
++static int s_got_ip_once = 0;     /* once we've had an IP, reconnect forever */
+ #define MAX_RETRY 10
+ 
+ static void event_handler(void *arg, esp_event_base_t event_base,
+@@ -67,10 +70,16 @@ static void event_handler(void *arg, esp_event_base_t event_base,
+     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+         esp_wifi_connect();
+     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+-        if (s_retry_num < MAX_RETRY) {
++        /* Reconnect forever once we've ever had an IP: a router reboot or WiFi
++         * blip must never leave the node permanently offline (eldercare). The
++         * boot-time connect still caps at MAX_RETRY so boot can proceed / log a
++         * failure if the AP is down at install time. */
++        if (s_got_ip_once || s_retry_num < MAX_RETRY) {
+             esp_wifi_connect();
+-            s_retry_num++;
+-            ESP_LOGI(TAG, "Retrying WiFi connection (%d/%d)", s_retry_num, MAX_RETRY);
++            if (!s_got_ip_once) {
++                s_retry_num++;
++                ESP_LOGI(TAG, "Retrying WiFi connection (%d/%d)", s_retry_num, MAX_RETRY);
++            }
+         } else {
+             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+         }
+@@ -78,6 +87,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
+         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+         s_retry_num = 0;
++        s_got_ip_once = 1;
+         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+     }
+ }
+@@ -205,6 +215,20 @@ void app_main(void)
+     /* Load runtime config (NVS overrides Kconfig defaults) */
+     nvs_config_load(&g_nvs_config);
+ 
++#if defined(CONFIG_IDF_TARGET_ESP32C6)
++    /* XIAO ESP32-C6 antenna RF switch: GPIO14 LOW powers the switch on, GPIO3
++     * HIGH selects the external u.FL antenna (LOW = onboard ceramic). Better
++     * range/wall penetration — the external antenna MUST be physically attached
++     * or RF will be worse than the onboard one. Set before WiFi starts. */
++    gpio_reset_pin(GPIO_NUM_14);
++    gpio_set_direction(GPIO_NUM_14, GPIO_MODE_OUTPUT);
++    gpio_set_level(GPIO_NUM_14, 0);
++    gpio_reset_pin(GPIO_NUM_3);
++    gpio_set_direction(GPIO_NUM_3, GPIO_MODE_OUTPUT);
++    gpio_set_level(GPIO_NUM_3, 1);
++    ESP_LOGI(TAG, "C6 antenna switch -> external (u.FL)");
++#endif
++
+     /* Capture node_id IMMEDIATELY — before wifi_init_sta() can corrupt
+      * g_nvs_config. See #232/#375/#390: WiFi driver init clobbers the struct
+      * on some devices, reverting node_id to the Kconfig default of 1. */
+@@ -405,8 +429,28 @@ void app_main(void)
          }
      }
  
@@ -69,15 +134,16 @@ index 67973ce..7a87b00 100644
 +     * no radar wired probes and falls back to CSI-only gracefully. */
 +    esp_err_t mmwave_ret = mmwave_sensor_init(4, 3);
 +#else
-+    /* Other targets (e.g. C6): default pins. No mmWave is wired in this setup;
-+     * GPIO3/4 are not the C6 D2/D3, so use the generic default and let the probe
-+     * fall back to CSI-only. */
-+    esp_err_t mmwave_ret = mmwave_sensor_init(-1, -1);
++    /* Other targets (e.g. C6): no radar is wired and the default pins aren't the
++     * C6 D2/D3, so skip the probe entirely (S3-only mmWave). Avoids a pointless
++     * UART probe + log noise on every boot. */
++    esp_err_t mmwave_ret = ESP_ERR_NOT_SUPPORTED;
++    ESP_LOGI(TAG, "mmWave probe skipped (S3-only build target)");
 +#endif
      if (mmwave_ret == ESP_OK) {
          mmwave_state_t mw;
          if (mmwave_sensor_get_state(&mw)) {
-@@ -476,6 +496,10 @@ void app_main(void)
+@@ -476,6 +520,10 @@ void app_main(void)
      }
  #endif
  
