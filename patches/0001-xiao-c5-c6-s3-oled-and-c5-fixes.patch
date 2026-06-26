@@ -36,10 +36,15 @@ index a92d040..de6e4ae 100644
      return ESP_OK;
  }
 diff --git a/firmware/esp32-csi-node/main/main.c b/firmware/esp32-csi-node/main/main.c
-index 67973ce..7875866 100644
+index 67973ce..f9c9730 100644
 --- a/firmware/esp32-csi-node/main/main.c
 +++ b/firmware/esp32-csi-node/main/main.c
-@@ -19,6 +19,7 @@
+@@ -15,10 +15,12 @@
+ #include "esp_wifi.h"
+ #include "esp_event.h"
+ #include "esp_log.h"
++#include "esp_timer.h"
+ #include "nvs_flash.h"
  #include "esp_app_desc.h"
  #include "sdkconfig.h"
  #include "led_strip.h"
@@ -47,7 +52,7 @@ index 67973ce..7875866 100644
  
  #include "csi_collector.h"
  #include "stream_sender.h"
-@@ -29,6 +30,7 @@
+@@ -29,6 +31,7 @@
  #include "wasm_runtime.h"
  #include "wasm_upload.h"
  #include "display_task.h"
@@ -55,7 +60,7 @@ index 67973ce..7875866 100644
  #include "mmwave_sensor.h"
  #include "swarm_bridge.h"
  #include "rv_radio_ops.h"          /* ADR-081 Layer 1 — Radio Abstraction Layer. */
-@@ -59,6 +61,7 @@ nvs_config_t g_nvs_config;
+@@ -59,6 +62,7 @@ nvs_config_t g_nvs_config;
  
  static EventGroupHandle_t s_wifi_event_group;
  static int s_retry_num = 0;
@@ -63,7 +68,7 @@ index 67973ce..7875866 100644
  #define MAX_RETRY 10
  
  static void event_handler(void *arg, esp_event_base_t event_base,
-@@ -67,10 +70,16 @@ static void event_handler(void *arg, esp_event_base_t event_base,
+@@ -67,10 +71,16 @@ static void event_handler(void *arg, esp_event_base_t event_base,
      if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
          esp_wifi_connect();
      } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -83,7 +88,7 @@ index 67973ce..7875866 100644
          } else {
              xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
          }
-@@ -78,6 +87,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
+@@ -78,6 +88,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
          ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
          ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
          s_retry_num = 0;
@@ -91,7 +96,7 @@ index 67973ce..7875866 100644
          xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
      }
  }
-@@ -205,6 +215,20 @@ void app_main(void)
+@@ -205,6 +216,20 @@ void app_main(void)
      /* Load runtime config (NVS overrides Kconfig defaults) */
      nvs_config_load(&g_nvs_config);
  
@@ -112,7 +117,7 @@ index 67973ce..7875866 100644
      /* Capture node_id IMMEDIATELY — before wifi_init_sta() can corrupt
       * g_nvs_config. See #232/#375/#390: WiFi driver init clobbers the struct
       * on some devices, reverting node_id to the Kconfig default of 1. */
-@@ -405,8 +429,28 @@ void app_main(void)
+@@ -405,8 +430,28 @@ void app_main(void)
          }
      }
  
@@ -143,7 +148,7 @@ index 67973ce..7875866 100644
      if (mmwave_ret == ESP_OK) {
          mmwave_state_t mw;
          if (mmwave_sensor_get_state(&mw)) {
-@@ -476,6 +520,10 @@ void app_main(void)
+@@ -476,6 +521,10 @@ void app_main(void)
      }
  #endif
  
@@ -154,14 +159,105 @@ index 67973ce..7875866 100644
      /* RuView#893/#521: the MGMT-only promiscuous filter (set in
       * csi_collector_init as the #396 display-crash workaround) starves the CSI
       * callback on display-less boards — yield collapses to 0 pps and the node
+@@ -500,8 +549,21 @@ void app_main(void)
+              (swarm_ret == ESP_OK) ? g_nvs_config.seed_url : "off",
+              (adapt_ret == ESP_OK) ? "on" : "off");
+ 
+-    /* Main loop — keep alive */
++    /* Main loop — connectivity watchdog. Once the node has ever streamed, it
++     * reboots itself if sends stall too long (no-IP / wedged WiFi stack) so it
++     * self-heals overnight instead of staying dead until a manual power-cycle
++     * (observed: C5/C6 went silent ~2am and never came back). A full CPU/task
++     * hang is caught separately by the Task WDT (CONFIG_ESP_TASK_WDT_PANIC). */
++    const int64_t WDT_STALL_US = 90 * 1000000LL;   /* 90 s without a good send */
+     while (1) {
+         vTaskDelay(pdMS_TO_TICKS(10000));
++        if (s_got_ip_once) {
++            int64_t last = stream_sender_last_ok_us();
++            if (last > 0 && (esp_timer_get_time() - last) > WDT_STALL_US) {
++                ESP_LOGE(TAG, "watchdog: no successful send for >%llds — restarting",
++                         (long long)(WDT_STALL_US / 1000000));
++                esp_restart();
++            }
++        }
+     }
+ }
+diff --git a/firmware/esp32-csi-node/main/stream_sender.c b/firmware/esp32-csi-node/main/stream_sender.c
+index 3d2c98f..a884818 100644
+--- a/firmware/esp32-csi-node/main/stream_sender.c
++++ b/firmware/esp32-csi-node/main/stream_sender.c
+@@ -37,6 +37,10 @@ static uint32_t s_enomem_suppressed = 0;
+  * succeeds. */
+ static uint32_t s_enomem_streak = 0;
+ 
++/* Watchdog signal: esp_timer time (us) of the last sendto that got through.
++ * app_main reboots the node if this stalls (no-IP / dead WiFi stack). */
++static volatile int64_t s_last_tx_ok_us = 0;
++
+ static int sender_init_internal(const char *ip, uint16_t port)
+ {
+     s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+@@ -118,9 +122,15 @@ int stream_sender_send(const uint8_t *data, size_t len)
+ 
+     /* A send got through — buffer pressure cleared; reset the backoff streak. */
+     s_enomem_streak = 0;
++    s_last_tx_ok_us = esp_timer_get_time();
+     return sent;
+ }
+ 
++int64_t stream_sender_last_ok_us(void)
++{
++    return s_last_tx_ok_us;
++}
++
+ void stream_sender_deinit(void)
+ {
+     if (s_sock >= 0) {
+diff --git a/firmware/esp32-csi-node/main/stream_sender.h b/firmware/esp32-csi-node/main/stream_sender.h
+index f500b05..a5868dd 100644
+--- a/firmware/esp32-csi-node/main/stream_sender.h
++++ b/firmware/esp32-csi-node/main/stream_sender.h
+@@ -41,4 +41,10 @@ int stream_sender_send(const uint8_t *data, size_t len);
+  */
+ void stream_sender_deinit(void);
+ 
++/**
++ * esp_timer time (us) of the last sendto that succeeded, or 0 if none yet.
++ * Used by the app_main connectivity watchdog to detect a wedged WiFi stack.
++ */
++int64_t stream_sender_last_ok_us(void);
++
+ #endif /* STREAM_SENDER_H */
 diff --git a/firmware/esp32-csi-node/sdkconfig.defaults b/firmware/esp32-csi-node/sdkconfig.defaults
-index 94ec092..5203597 100644
+index 94ec092..01c32f3 100644
 --- a/firmware/esp32-csi-node/sdkconfig.defaults
 +++ b/firmware/esp32-csi-node/sdkconfig.defaults
-@@ -66,3 +66,6 @@ CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
+@@ -66,3 +66,12 @@ CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
  # Was present in sdkconfig.defaults.template but missing here — fixed
  # in the v0.6.5-esp32 release.
  CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=8192
 +
 +# Disable RM67162 AMOLED/LVGL (not present) so SSD1306 OLED can own I2C_NUM_0 via the new driver
 +CONFIG_DISPLAY_ENABLE=n
++
++# Reboot the chip if a task hangs (default Task-WDT only warns). Lets a wedged
++# node self-heal instead of staying dead until a manual power-cycle — observed
++# on C5/C6 going silent overnight (no ping/ARP). Pairs with the app_main
++# connectivity watchdog (reboot on send stall) in main.c.
++CONFIG_ESP_TASK_WDT_PANIC=y
+diff --git a/firmware/esp32-csi-node/sdkconfig.defaults.esp32c6 b/firmware/esp32-csi-node/sdkconfig.defaults.esp32c6
+index b6bda70..0da1266 100644
+--- a/firmware/esp32-csi-node/sdkconfig.defaults.esp32c6
++++ b/firmware/esp32-csi-node/sdkconfig.defaults.esp32c6
+@@ -70,6 +70,8 @@ CONFIG_LWIP_SO_RCVBUF=y
+ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=8192
+ 
+-# ── Power: keep CPU at max 160 MHz (C6 ceiling) for DSP throughput ──
+-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160
++# ── Power/heat: 80 MHz (was 160) — C6 ran hot + hung overnight; watchdog reboots if it still wedges ──
++CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
++CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80
++# Lower CSI processing/emit cadence (was 200ms) to cut CPU load + heat
++CONFIG_ADAPTIVE_FAST_LOOP_MS=400
