@@ -52,6 +52,8 @@ CONFIG_LWIP_SO_RCVBUF=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=8192
 
-# ── Power: 160 MHz (proven stable; C5 can do 240 but 160 matches C6) ──
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160
+# ── Power/heat: 80 MHz (was 160) — C5 ran hot + hung overnight; watchdog reboots if it still wedges ──
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80
+# Lower CSI processing/emit cadence (was 200ms) to cut CPU load + heat
+CONFIG_ADAPTIVE_FAST_LOOP_MS=400
