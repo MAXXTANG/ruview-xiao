@@ -36,7 +36,7 @@ index a92d040..de6e4ae 100644
      return ESP_OK;
  }
 diff --git a/firmware/esp32-csi-node/main/main.c b/firmware/esp32-csi-node/main/main.c
-index 67973ce..f9c9730 100644
+index 67973ce..d73595b 100644
 --- a/firmware/esp32-csi-node/main/main.c
 +++ b/firmware/esp32-csi-node/main/main.c
 @@ -15,10 +15,12 @@
@@ -159,7 +159,7 @@ index 67973ce..f9c9730 100644
      /* RuView#893/#521: the MGMT-only promiscuous filter (set in
       * csi_collector_init as the #396 display-crash workaround) starves the CSI
       * callback on display-less boards — yield collapses to 0 pps and the node
-@@ -500,8 +549,21 @@ void app_main(void)
+@@ -500,8 +549,24 @@ void app_main(void)
               (swarm_ret == ESP_OK) ? g_nvs_config.seed_url : "off",
               (adapt_ret == ESP_OK) ? "on" : "off");
  
@@ -169,7 +169,10 @@ index 67973ce..f9c9730 100644
 +     * self-heals overnight instead of staying dead until a manual power-cycle
 +     * (observed: C5/C6 went silent ~2am and never came back). A full CPU/task
 +     * hang is caught separately by the Task WDT (CONFIG_ESP_TASK_WDT_PANIC). */
-+    const int64_t WDT_STALL_US = 90 * 1000000LL;   /* 90 s without a good send */
++    const int64_t WDT_STALL_US = 240 * 1000000LL;  /* 240 s without a good send:
++        only reboot on a genuinely extended stall. A transient AP hiccup recovers
++        via the infinite WiFi-reconnect well within this, so we no longer reboot
++        the whole fleet in a cascade every time the router blips. */
      while (1) {
          vTaskDelay(pdMS_TO_TICKS(10000));
 +        if (s_got_ip_once) {
@@ -229,10 +232,10 @@ index f500b05..a5868dd 100644
 +
  #endif /* STREAM_SENDER_H */
 diff --git a/firmware/esp32-csi-node/sdkconfig.defaults b/firmware/esp32-csi-node/sdkconfig.defaults
-index 94ec092..01c32f3 100644
+index 94ec092..db071b1 100644
 --- a/firmware/esp32-csi-node/sdkconfig.defaults
 +++ b/firmware/esp32-csi-node/sdkconfig.defaults
-@@ -66,3 +66,12 @@ CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
+@@ -66,3 +66,16 @@ CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=y
  # Was present in sdkconfig.defaults.template but missing here — fixed
  # in the v0.6.5-esp32 release.
  CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=8192
@@ -245,6 +248,10 @@ index 94ec092..01c32f3 100644
 +# on C5/C6 going silent overnight (no ping/ARP). Pairs with the app_main
 +# connectivity watchdog (reboot on send stall) in main.c.
 +CONFIG_ESP_TASK_WDT_PANIC=y
++# Task-WDT timeout 5s -> 15s: only a genuinely long hang triggers the panic
++# reboot. Transient bursts (WiFi reconnect, mmWave UART, CSI spikes) that briefly
++# exceed 5s no longer false-reboot otherwise-healthy nodes (S3s were churning).
++CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 diff --git a/firmware/esp32-csi-node/sdkconfig.defaults.esp32c6 b/firmware/esp32-csi-node/sdkconfig.defaults.esp32c6
 index b6bda70..0da1266 100644
 --- a/firmware/esp32-csi-node/sdkconfig.defaults.esp32c6
